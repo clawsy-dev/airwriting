@@ -4,27 +4,24 @@ import '../services/drawing_service.dart';
 
 class DrawingCanvas extends StatelessWidget {
   final DrawingService service;
+  final Offset? fingerPosition;
 
-  const DrawingCanvas({super.key, required this.service});
+  const DrawingCanvas({super.key, required this.service, this.fingerPosition});
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
       animation: service,
-      builder: (context, _) {
-        return GestureDetector(
-          onPanStart: (d) => service.startStroke(d.localPosition),
-          onPanUpdate: (d) => service.addPoint(d.localPosition),
-          onPanEnd: (_) => service.endStroke(),
-          child: CustomPaint(
-            painter: _CanvasPainter(
-              strokes: service.strokes,
-              currentStroke: service.currentStroke,
-            ),
-            child: Container(color: Colors.transparent),
-          ),
-        );
-      },
+      builder: (_, __) => CustomPaint(
+        painter: _CanvasPainter(
+          strokes: service.strokes,
+          currentStroke: service.currentStroke,
+          fingerPosition: fingerPosition,
+          mode: service.mode,
+          color: service.color,
+        ),
+        size: Size.infinite,
+      ),
     );
   }
 }
@@ -32,47 +29,40 @@ class DrawingCanvas extends StatelessWidget {
 class _CanvasPainter extends CustomPainter {
   final List<Stroke> strokes;
   final Stroke? currentStroke;
+  final Offset? fingerPosition;
+  final DrawMode mode;
+  final Color color;
 
-  _CanvasPainter({required this.strokes, this.currentStroke});
+  const _CanvasPainter({
+    required this.strokes,
+    this.currentStroke,
+    this.fingerPosition,
+    required this.mode,
+    required this.color,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
-    for (final stroke in [...strokes, if (currentStroke != null) currentStroke!]) {
-      _drawStroke(canvas, stroke);
-    }
+    for (final s in strokes) _paintStroke(canvas, s);
+    if (currentStroke != null) _paintStroke(canvas, currentStroke!);
+    if (fingerPosition != null) _paintCursor(canvas, fingerPosition!);
   }
 
-  void _drawStroke(Canvas canvas, Stroke stroke) {
+  void _paintStroke(Canvas canvas, Stroke stroke) {
     if (stroke.points.length < 2) return;
+
+    final glowPaint = Paint()
+      ..color = stroke.color.withOpacity(0.3)
+      ..strokeWidth = stroke.thickness * 3
+      ..strokeCap = StrokeCap.round
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10)
+      ..style = PaintingStyle.stroke;
+
     final paint = Paint()
-      ..color = stroke.isEraser ? Colors.transparent : stroke.color
+      ..color = stroke.color
       ..strokeWidth = stroke.thickness
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
-      ..style = PaintingStyle.stroke
-      ..blendMode = stroke.isEraser ? BlendMode.clear : BlendMode.srcOver;
-
-    if (stroke.isEraser) {
-      final eraserPaint = Paint()
-        ..color = Colors.transparent
-        ..strokeWidth = stroke.thickness
-        ..strokeCap = StrokeCap.round
-        ..blendMode = BlendMode.clear
-        ..style = PaintingStyle.stroke;
-      final path = Path()..moveTo(stroke.points.first.dx, stroke.points.first.dy);
-      for (int i = 1; i < stroke.points.length; i++) {
-        path.lineTo(stroke.points[i].dx, stroke.points[i].dy);
-      }
-      canvas.drawPath(path, eraserPaint);
-      return;
-    }
-
-    // Draw with glow effect
-    final glowPaint = Paint()
-      ..color = stroke.color.withOpacity(0.3)
-      ..strokeWidth = stroke.thickness * 2.5
-      ..strokeCap = StrokeCap.round
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8)
       ..style = PaintingStyle.stroke;
 
     final path = Path()..moveTo(stroke.points.first.dx, stroke.points.first.dy);
@@ -87,6 +77,31 @@ class _CanvasPainter extends CustomPainter {
 
     canvas.drawPath(path, glowPaint);
     canvas.drawPath(path, paint);
+  }
+
+  void _paintCursor(Canvas canvas, Offset pos) {
+    final cursorColor = mode == DrawMode.draw
+        ? color
+        : mode == DrawMode.erase
+            ? Colors.orangeAccent
+            : Colors.white54;
+
+    // Outer glow
+    canvas.drawCircle(pos, 20,
+      Paint()
+        ..color = cursorColor.withOpacity(0.2)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10));
+
+    // Ring
+    canvas.drawCircle(pos, 12,
+      Paint()
+        ..color = cursorColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2);
+
+    // Center dot
+    canvas.drawCircle(pos, 4,
+      Paint()..color = cursorColor);
   }
 
   @override
