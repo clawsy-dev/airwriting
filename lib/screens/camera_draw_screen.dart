@@ -26,9 +26,18 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
   final GlobalKey _repaintKey = GlobalKey();
 
   Offset? _fingerPosition;
+  Offset? _smoothedPosition; // EMA-smoothed finger position
   HandGesture _gesture = HandGesture.idle;
   bool _isInitialized = false;
   int _cameraIndex = 1; // front camera
+
+  // Stability buffer — prevents flickering between draw/idle
+  int _drawFrameCount = 0;
+  int _idleFrameCount = 0;
+  int _graceFramesLeft = 0;
+  static const int _kStableFrames = 8;   // frames needed to switch TO draw
+  static const int _kGraceFrames = 15;   // frames to stay in draw after losing detection
+  static const double _kSmoothing = 0.35; // EMA alpha for position (lower = smoother)
 
   static const _colors = [
     Colors.cyanAccent,
@@ -74,29 +83,52 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
     if (!mounted) return;
     final size = MediaQuery.of(context).size;
     final result = await _handTracker.processFrame(image, size, _getRotation());
-
     if (!mounted) return;
+
+    final rawPos = result.fingertip;
+    final detected = rawPos != null;
+
+    // ── Smooth finger position with exponential moving average ──
+    if (detected) {
+      if (_smoothedPosition == null) {
+        _smoothedPosition = rawPos;
+      } else {
+        _smoothedPosition = Offset(
+          _smoothedPosition!.dx * (1 - _kSmoothing) + rawPos.dx * _kSmoothing,
+          _smoothedPosition!.dy * (1 - _kSmoothing) + rawPos.dy * _kSmoothing,
+        );
+      }
+    }
+
+    // ── Stability buffer: require N consecutive frames before switching ──
+    if (detected) {
+      _drawFrameCount++;
+      _idleFrameCount = 0;
+      _graceFramesLeft = _kGraceFrames; // reset grace period
+    } else {
+      _idleFrameCount++;
+      _drawFrameCount = 0;
+      if (_graceFramesLeft > 0) _graceFramesLeft--;
+    }
+
+    // Determine stable mode
+    final bool shouldDraw = _drawFrameCount >= _kStableFrames || _graceFramesLeft > 0;
+    final stableGesture = shouldDraw ? HandGesture.draw : HandGesture.idle;
+
     setState(() {
-      _fingerPosition = result.fingertip;
-      _gesture = result.gesture;
+      _fingerPosition = _smoothedPosition;
+      _gesture = stableGesture;
     });
 
-    // Update drawing service based on gesture
-    if (result.fingertip != null) {
-      switch (result.gesture) {
-        case HandGesture.draw:
-          _drawingService.setMode(DrawMode.draw);
-          _drawingService.addPoint(result.fingertip!);
-          break;
-        case HandGesture.erase:
-          _drawingService.setMode(DrawMode.idle);
-          _drawingService.eraseLastStroke();
-          break;
-        case HandGesture.idle:
-          _drawingService.setMode(DrawMode.idle);
-          break;
-      }
+    // ── Update drawing service ──
+    if (stableGesture == HandGesture.draw && _smoothedPosition != null) {
+      _drawingService.setMode(DrawMode.draw);
+      _drawingService.addPoint(_smoothedPosition!);
     } else {
+      // Only reset smoothed pos when truly idle (grace expired + no detection)
+      if (!detected && _graceFramesLeft == 0) {
+        _smoothedPosition = null;
+      }
       _drawingService.setMode(DrawMode.idle);
     }
   }
@@ -105,8 +137,14 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
     await _cameraController?.stopImageStream();
     await _cameraController?.dispose();
     _cameraController = null;
+    _drawFrameCount = 0;
+    _idleFrameCount = 0;
+    _graceFramesLeft = 0;
+    _smoothedPosition = null;
     setState(() {
       _isInitialized = false;
+      _fingerPosition = null;
+      _gesture = HandGesture.idle;
       _cameraIndex = _cameraIndex == 0 ? 1 : 0;
     });
     await _initCamera();
@@ -179,11 +217,7 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
             child: Stack(
               children: [
                 Positioned.fill(
-                  child: Transform(
-                    alignment: Alignment.center,
-                    transform: Matrix4.identity()..scale(-1.0, 1.0),
-                    child: CameraPreview(_cameraController!),
-                  ),
+                  child: CameraPreview(_cameraController!),
                 ),
                 // Drawing canvas overlay
                 Positioned.fill(
