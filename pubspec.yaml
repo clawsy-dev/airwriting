@@ -1,5 +1,5 @@
 name: airwriting
-description: Air Writing - Draw in the air with hand gestures
+description: Air Writing - Draw in the air with your finger
 publish_to: 'none'
 version: 1.0.0+1
 
@@ -9,10 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  camera: ^0.10.5+9
   permission_handler: ^11.3.0
   path_provider: ^2.1.2
-  image_gallery_saver: ^2.0.3
   share_plus: ^9.0.0
   cupertino_icons: ^1.0.2
 
