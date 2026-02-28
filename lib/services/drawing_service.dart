@@ -6,9 +6,9 @@ enum DrawMode { idle, draw, erase }
 class DrawingService extends ChangeNotifier {
   final List<Stroke> _strokes = [];
   Stroke? _currentStroke;
-  DrawMode _mode = DrawMode.idle;
+  DrawMode _mode = DrawMode.draw; // start in draw mode by default
   Color _color = Colors.cyanAccent;
-  double _thickness = 6.0;
+  double _thickness = 10.0; // thicker default for visibility
 
   List<Stroke> get strokes => List.unmodifiable(_strokes);
   Stroke? get currentStroke => _currentStroke;
