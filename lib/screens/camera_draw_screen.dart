@@ -26,18 +26,17 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
   final GlobalKey _repaintKey = GlobalKey();
 
   Offset? _fingerPosition;
-  Offset? _smoothedPosition; // EMA-smoothed finger position
-  HandGesture _gesture = HandGesture.idle;
+  Offset? _smoothedPosition;
+  bool _isDetecting = false; // is wrist currently detected
   bool _isInitialized = false;
   int _cameraIndex = 1; // front camera
 
-  // Stability buffer — prevents flickering between draw/idle
-  int _drawFrameCount = 0;
-  int _idleFrameCount = 0;
-  int _graceFramesLeft = 0;
-  static const int _kStableFrames = 8;   // frames needed to switch TO draw
-  static const int _kGraceFrames = 15;   // frames to stay in draw after losing detection
-  static const double _kSmoothing = 0.35; // EMA alpha for position (lower = smoother)
+  // Stability buffer
+  int _detectedFrames = 0;
+  int _graceFrames = 0;
+  static const int _kStableFrames = 6;
+  static const int _kGraceFrames = 12;
+  static const double _kSmoothing = 0.4;
 
   static const _colors = [
     Colors.cyanAccent,
@@ -82,54 +81,38 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
   void _onFrame(CameraImage image) async {
     if (!mounted) return;
     final size = MediaQuery.of(context).size;
-    final result = await _handTracker.processFrame(image, size, _getRotation());
+    final rawPos = await _handTracker.processFrame(image, size, _getRotation());
     if (!mounted) return;
 
-    final rawPos = result.fingertip;
     final detected = rawPos != null;
 
-    // ── Smooth finger position with exponential moving average ──
+    // Smooth position
     if (detected) {
-      if (_smoothedPosition == null) {
-        _smoothedPosition = rawPos;
-      } else {
-        _smoothedPosition = Offset(
-          _smoothedPosition!.dx * (1 - _kSmoothing) + rawPos.dx * _kSmoothing,
-          _smoothedPosition!.dy * (1 - _kSmoothing) + rawPos.dy * _kSmoothing,
-        );
-      }
-    }
-
-    // ── Stability buffer: require N consecutive frames before switching ──
-    if (detected) {
-      _drawFrameCount++;
-      _idleFrameCount = 0;
-      _graceFramesLeft = _kGraceFrames; // reset grace period
+      _smoothedPosition = _smoothedPosition == null
+          ? rawPos
+          : Offset(
+              _smoothedPosition!.dx * (1 - _kSmoothing) + rawPos.dx * _kSmoothing,
+              _smoothedPosition!.dy * (1 - _kSmoothing) + rawPos.dy * _kSmoothing,
+            );
+      _detectedFrames++;
+      _graceFrames = _kGraceFrames;
     } else {
-      _idleFrameCount++;
-      _drawFrameCount = 0;
-      if (_graceFramesLeft > 0) _graceFramesLeft--;
+      _detectedFrames = 0;
+      if (_graceFrames > 0) _graceFrames--;
+      if (_graceFrames == 0) _smoothedPosition = null;
     }
 
-    // Determine stable mode
-    final bool shouldDraw = _drawFrameCount >= _kStableFrames || _graceFramesLeft > 0;
-    final stableGesture = shouldDraw ? HandGesture.draw : HandGesture.idle;
+    final stable = _detectedFrames >= _kStableFrames || _graceFrames > 0;
 
     setState(() {
       _fingerPosition = _smoothedPosition;
-      _gesture = stableGesture;
+      _isDetecting = stable;
     });
 
-    // ── Update drawing service ──
-    if (stableGesture == HandGesture.draw && _smoothedPosition != null) {
-      _drawingService.setMode(DrawMode.draw);
+    if (stable && _smoothedPosition != null && _drawingService.mode == DrawMode.draw) {
       _drawingService.addPoint(_smoothedPosition!);
-    } else {
-      // Only reset smoothed pos when truly idle (grace expired + no detection)
-      if (!detected && _graceFramesLeft == 0) {
-        _smoothedPosition = null;
-      }
-      _drawingService.setMode(DrawMode.idle);
+    } else if (!stable) {
+      _drawingService.commitCurrentStroke();
     }
   }
 
@@ -137,14 +120,13 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
     await _cameraController?.stopImageStream();
     await _cameraController?.dispose();
     _cameraController = null;
-    _drawFrameCount = 0;
-    _idleFrameCount = 0;
-    _graceFramesLeft = 0;
+    _detectedFrames = 0;
+    _graceFrames = 0;
     _smoothedPosition = null;
     setState(() {
       _isInitialized = false;
       _fingerPosition = null;
-      _gesture = HandGesture.idle;
+      _isDetecting = false;
       _cameraIndex = _cameraIndex == 0 ? 1 : 0;
     });
     await _initCamera();
@@ -168,7 +150,7 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
     await file.writeAsBytes(bytes);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Saved to ${file.path}'), backgroundColor: Colors.green.shade800),
+        SnackBar(content: const Text('✅ Saved!'), backgroundColor: Colors.green.shade800),
       );
     }
   }
@@ -195,14 +177,11 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: _isInitialized ? _buildMain() : const Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(color: Colors.cyanAccent),
-            SizedBox(height: 16),
-            Text('Starting camera...', style: TextStyle(color: Colors.white70)),
-          ],
-        ),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          CircularProgressIndicator(color: Colors.cyanAccent),
+          SizedBox(height: 16),
+          Text('Starting camera...', style: TextStyle(color: Colors.white70)),
+        ]),
       ),
     );
   }
@@ -210,24 +189,20 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
   Widget _buildMain() {
     return Stack(
       children: [
-        // Camera preview
+        // Camera + canvas
         Positioned.fill(
           child: RepaintBoundary(
             key: _repaintKey,
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: CameraPreview(_cameraController!),
+            child: Stack(children: [
+              Positioned.fill(child: CameraPreview(_cameraController!)),
+              Positioned.fill(
+                child: DrawingCanvas(
+                  service: _drawingService,
+                  fingerPosition: _fingerPosition,
+                  isDetecting: _isDetecting,
                 ),
-                // Drawing canvas overlay
-                Positioned.fill(
-                  child: DrawingCanvas(
-                    service: _drawingService,
-                    fingerPosition: _fingerPosition,
-                  ),
-                ),
-              ],
-            ),
+              ),
+            ]),
           ),
         ),
 
@@ -239,25 +214,18 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                'AIR WRITING',
-                style: TextStyle(
-                  color: Colors.cyanAccent,
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 4,
-                ),
-              ),
-              _GestureBadge(gesture: _gesture),
+              const Text('AIR WRITING',
+                style: TextStyle(color: Colors.cyanAccent, fontSize: 16,
+                    fontWeight: FontWeight.bold, letterSpacing: 4)),
+              _StatusBadge(isDetecting: _isDetecting, mode: _drawingService.mode),
             ],
           ),
         ),
 
-        // Bottom controls
+        // Bottom toolbar
         Positioned(
           bottom: MediaQuery.of(context).padding.bottom + 12,
-          left: 12,
-          right: 12,
+          left: 12, right: 12,
           child: _buildToolbar(),
         ),
       ],
@@ -270,84 +238,103 @@ class _CameraDrawScreenState extends State<CameraDrawScreen> {
       builder: (_, __) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
         decoration: BoxDecoration(
-          color: Colors.black.withOpacity(0.75),
+          color: Colors.black.withOpacity(0.8),
           borderRadius: BorderRadius.circular(20),
           border: Border.all(color: Colors.white12),
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _ToolBtn(icon: Icons.undo, label: 'Undo', onTap: _drawingService.undo, color: Colors.white70),
-                _ToolBtn(icon: Icons.delete_outline, label: 'Clear', onTap: _drawingService.clear, color: Colors.redAccent),
-                _ToolBtn(icon: Icons.save_alt, label: 'Save', onTap: _save, color: Colors.greenAccent),
-                _ToolBtn(icon: Icons.share, label: 'Share', onTap: _share, color: Colors.cyanAccent),
-                _ToolBtn(icon: Icons.flip_camera_ios, label: 'Flip', onTap: _toggleCamera, color: Colors.white70),
-              ],
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          // Mode + actions row
+          Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+            // DRAW mode button
+            _ModeBtn(
+              label: '✏️ Draw',
+              active: _drawingService.mode == DrawMode.draw,
+              color: Colors.cyanAccent,
+              onTap: () => _drawingService.setMode(DrawMode.draw),
             ),
-            const SizedBox(height: 10),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: _colors.map((c) => GestureDetector(
-                onTap: () => _drawingService.setColor(c),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  margin: const EdgeInsets.symmetric(horizontal: 5),
-                  width: _drawingService.color == c ? 32 : 24,
-                  height: _drawingService.color == c ? 32 : 24,
-                  decoration: BoxDecoration(
-                    color: c,
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: _drawingService.color == c ? Colors.white : Colors.transparent,
-                      width: 2,
-                    ),
-                    boxShadow: _drawingService.color == c
-                        ? [BoxShadow(color: c.withOpacity(0.8), blurRadius: 10, spreadRadius: 2)]
-                        : [],
+            // ERASE mode button
+            _ModeBtn(
+              label: '🧹 Erase',
+              active: _drawingService.mode == DrawMode.erase,
+              color: Colors.orangeAccent,
+              onTap: () => _drawingService.setMode(DrawMode.erase),
+            ),
+            _ToolBtn(icon: Icons.undo, label: 'Undo', onTap: _drawingService.undo, color: Colors.white70),
+            _ToolBtn(icon: Icons.delete_outline, label: 'Clear', onTap: _drawingService.clear, color: Colors.redAccent),
+            _ToolBtn(icon: Icons.save_alt, label: 'Save', onTap: _save, color: Colors.greenAccent),
+            _ToolBtn(icon: Icons.share, label: 'Share', onTap: _share, color: Colors.cyanAccent),
+            _ToolBtn(icon: Icons.flip_camera_ios, label: 'Flip', onTap: _toggleCamera, color: Colors.white70),
+          ]),
+          const SizedBox(height: 10),
+          // Color palette
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: _colors.map((c) =>
+            GestureDetector(
+              onTap: () {
+                _drawingService.setColor(c);
+                _drawingService.setMode(DrawMode.draw);
+              },
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 200),
+                margin: const EdgeInsets.symmetric(horizontal: 5),
+                width: _drawingService.color == c ? 32 : 24,
+                height: _drawingService.color == c ? 32 : 24,
+                decoration: BoxDecoration(
+                  color: c, shape: BoxShape.circle,
+                  border: Border.all(
+                    color: _drawingService.color == c ? Colors.white : Colors.transparent,
+                    width: 2,
                   ),
+                  boxShadow: _drawingService.color == c
+                      ? [BoxShadow(color: c.withOpacity(0.8), blurRadius: 10, spreadRadius: 2)]
+                      : [],
                 ),
-              )).toList(),
+              ),
             ),
-            const SizedBox(height: 6),
-            Row(
-              children: [
-                const Icon(Icons.line_weight, color: Colors.white38, size: 16),
-                Expanded(
-                  child: Slider(
-                    value: _drawingService.thickness,
-                    min: 2, max: 20,
-                    activeColor: _drawingService.color,
-                    inactiveColor: Colors.white12,
-                    onChanged: _drawingService.setThickness,
-                  ),
-                ),
-                Text(
-                  '${_drawingService.thickness.round()}px',
-                  style: const TextStyle(color: Colors.white38, fontSize: 11),
-                ),
-              ],
+          ).toList()),
+          const SizedBox(height: 6),
+          // Thickness slider
+          Row(children: [
+            const Icon(Icons.line_weight, color: Colors.white38, size: 16),
+            Expanded(
+              child: Slider(
+                value: _drawingService.thickness,
+                min: 2, max: 20,
+                activeColor: _drawingService.color,
+                inactiveColor: Colors.white12,
+                onChanged: _drawingService.setThickness,
+              ),
             ),
-          ],
-        ),
+            Text('${_drawingService.thickness.round()}px',
+                style: const TextStyle(color: Colors.white38, fontSize: 11)),
+          ]),
+        ]),
       ),
     );
   }
 }
 
-class _GestureBadge extends StatelessWidget {
-  final HandGesture gesture;
-  const _GestureBadge({required this.gesture});
+class _StatusBadge extends StatelessWidget {
+  final bool isDetecting;
+  final DrawMode mode;
+  const _StatusBadge({required this.isDetecting, required this.mode});
 
   @override
   Widget build(BuildContext context) {
-    final (label, color) = switch (gesture) {
-      HandGesture.draw => ('✏️ DRAW', Colors.cyanAccent),
-      HandGesture.erase => ('🧹 ERASE', Colors.orangeAccent),
-      HandGesture.idle => ('⏸ IDLE', Colors.white38),
-    };
+    final String label;
+    final Color color;
+    if (!isDetecting) {
+      label = '👋 Show hand';
+      color = Colors.white38;
+    } else if (mode == DrawMode.draw) {
+      label = '✏️ DRAWING';
+      color = Colors.cyanAccent;
+    } else if (mode == DrawMode.erase) {
+      label = '🧹 ERASING';
+      color = Colors.orangeAccent;
+    } else {
+      label = '✋ Detected';
+      color = Colors.greenAccent;
+    }
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       decoration: BoxDecoration(
@@ -360,6 +347,32 @@ class _GestureBadge extends StatelessWidget {
   }
 }
 
+class _ModeBtn extends StatelessWidget {
+  final String label;
+  final bool active;
+  final Color color;
+  final VoidCallback onTap;
+  const _ModeBtn({required this.label, required this.active, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: onTap,
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: active ? color.withOpacity(0.2) : Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: active ? color : Colors.white24),
+      ),
+      child: Text(label, style: TextStyle(
+        color: active ? color : Colors.white54,
+        fontSize: 12, fontWeight: FontWeight.w600,
+      )),
+    ),
+  );
+}
+
 class _ToolBtn extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -370,13 +383,10 @@ class _ToolBtn extends StatelessWidget {
   @override
   Widget build(BuildContext context) => GestureDetector(
     onTap: onTap,
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, color: color, size: 22),
-        const SizedBox(height: 2),
-        Text(label, style: TextStyle(color: color, fontSize: 9)),
-      ],
-    ),
+    child: Column(mainAxisSize: MainAxisSize.min, children: [
+      Icon(icon, color: color, size: 22),
+      const SizedBox(height: 2),
+      Text(label, style: TextStyle(color: color, fontSize: 9)),
+    ]),
   );
 }

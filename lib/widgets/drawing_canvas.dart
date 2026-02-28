@@ -5,8 +5,14 @@ import '../services/drawing_service.dart';
 class DrawingCanvas extends StatelessWidget {
   final DrawingService service;
   final Offset? fingerPosition;
+  final bool isDetecting;
 
-  const DrawingCanvas({super.key, required this.service, this.fingerPosition});
+  const DrawingCanvas({
+    super.key,
+    required this.service,
+    this.fingerPosition,
+    this.isDetecting = false,
+  });
 
   @override
   Widget build(BuildContext context) {

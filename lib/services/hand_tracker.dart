@@ -3,8 +3,6 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
-enum HandGesture { draw, idle, erase }
-
 class HandTracker {
   final PoseDetector _detector = PoseDetector(
     options: PoseDetectorOptions(
@@ -15,28 +13,46 @@ class HandTracker {
 
   bool _isBusy = false;
 
-  Future<({Offset? fingertip, HandGesture gesture})> processFrame(
+  /// Returns the wrist position on screen (null if not detected).
+  /// Uses the wrist landmark — far more reliable than finger landmarks.
+  Future<Offset?> processFrame(
     CameraImage image,
     Size screenSize,
     InputImageRotation rotation,
   ) async {
-    if (_isBusy) return (fingertip: null, gesture: HandGesture.idle);
+    if (_isBusy) return null;
     _isBusy = true;
 
     try {
       final inputImage = _buildInputImage(image, rotation);
-      if (inputImage == null) return (fingertip: null, gesture: HandGesture.idle);
+      if (inputImage == null) return null;
 
       final poses = await _detector.processImage(inputImage);
-      if (poses.isEmpty) return (fingertip: null, gesture: HandGesture.idle);
+      if (poses.isEmpty) return null;
 
       final pose = poses.first;
-      final gesture = _detectGesture(pose);
-      final fingertip = _getFingertip(pose, screenSize, image.width, image.height);
 
-      return (fingertip: fingertip, gesture: gesture);
+      // Try right wrist first, then left — whichever has higher confidence
+      final rWrist = pose.landmarks[PoseLandmarkType.rightWrist];
+      final lWrist = pose.landmarks[PoseLandmarkType.leftWrist];
+
+      PoseLandmark? best;
+      if (rWrist != null && lWrist != null) {
+        best = rWrist.likelihood >= lWrist.likelihood ? rWrist : lWrist;
+      } else {
+        best = rWrist ?? lWrist;
+      }
+
+      if (best == null || best.likelihood < 0.3) return null;
+
+      // Map normalized coordinates to screen coordinates
+      // x is mirrored for front camera (landmark.x is 0=left in image, but front cam is flipped)
+      final x = best.x * screenSize.width;
+      final y = best.y * screenSize.height;
+
+      return Offset(x, y);
     } catch (_) {
-      return (fingertip: null, gesture: HandGesture.idle);
+      return null;
     } finally {
       _isBusy = false;
     }
@@ -60,54 +76,6 @@ class HandTracker {
     } catch (_) {
       return null;
     }
-  }
-
-  HandGesture _detectGesture(Pose pose) {
-    // Use visibility of wrist vs shoulder to detect raised hand
-    final rightWrist = pose.landmarks[PoseLandmarkType.rightWrist];
-    final rightShoulder = pose.landmarks[PoseLandmarkType.rightShoulder];
-    final leftWrist = pose.landmarks[PoseLandmarkType.leftWrist];
-    final leftShoulder = pose.landmarks[PoseLandmarkType.leftShoulder];
-
-    // Check if either wrist is raised (above shoulder level in image = lower y value)
-    bool rightRaised = rightWrist != null && rightShoulder != null &&
-        rightWrist.likelihood > 0.5 && rightShoulder.likelihood > 0.5 &&
-        rightWrist.y < rightShoulder.y;
-
-    bool leftRaised = leftWrist != null && leftShoulder != null &&
-        leftWrist.likelihood > 0.5 && leftShoulder.likelihood > 0.5 &&
-        leftWrist.y < leftShoulder.y;
-
-    if (!rightRaised && !leftRaised) return HandGesture.idle;
-
-    // Use index finger vs middle finger position to determine draw vs idle
-    final rightIndex = pose.landmarks[PoseLandmarkType.rightIndex];
-    final rightMiddle = pose.landmarks[PoseLandmarkType.rightPinky];
-
-    if (rightIndex != null && rightMiddle != null &&
-        rightIndex.likelihood > 0.5 && rightMiddle.likelihood > 0.5) {
-      // If both index and middle are up → idle (move mode)
-      // If only index → draw
-      // This is an approximation — ML Kit pose doesn't give full finger details
-      return HandGesture.draw;
-    }
-
-    return HandGesture.draw;
-  }
-
-  Offset? _getFingertip(Pose pose, Size screenSize, int imgWidth, int imgHeight) {
-    // Try right index first, then left
-    PoseLandmark? landmark = pose.landmarks[PoseLandmarkType.rightIndex];
-    if (landmark == null || landmark.likelihood < 0.4) {
-      landmark = pose.landmarks[PoseLandmarkType.leftIndex];
-    }
-    if (landmark == null || landmark.likelihood < 0.4) return null;
-
-    // Mirror x for front camera (selfie mode)
-    final x = (1.0 - landmark.x) * screenSize.width;
-    final y = landmark.y * screenSize.height;
-
-    return Offset(x, y);
   }
 
   Future<void> dispose() async {

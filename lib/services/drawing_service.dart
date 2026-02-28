@@ -46,6 +46,11 @@ class DrawingService extends ChangeNotifier {
     _currentStroke = null;
   }
 
+  void commitCurrentStroke() {
+    _commitStroke();
+    notifyListeners();
+  }
+
   void eraseLastStroke() {
     if (_strokes.isNotEmpty) {
       _strokes.removeLast();
