@@ -6,9 +6,21 @@ enum DrawMode { idle, draw, erase }
 class DrawingService extends ChangeNotifier {
   final List<Stroke> _strokes = [];
   Stroke? _currentStroke;
-  DrawMode _mode = DrawMode.draw; // start in draw mode by default
+  DrawMode _mode = DrawMode.draw;
   Color _color = Colors.cyanAccent;
-  double _thickness = 10.0; // thicker default for visibility
+  double _thickness = 10.0;
+
+  DrawingService() {
+    // Debug: pre-draw a test stroke to verify canvas renders
+    _strokes.add(Stroke(
+      points: [
+        const Offset(80, 200), const Offset(120, 160), const Offset(160, 200),
+        const Offset(200, 160), const Offset(240, 200),
+      ],
+      color: Colors.cyanAccent,
+      thickness: 10,
+    ));
+  }
 
   List<Stroke> get strokes => List.unmodifiable(_strokes);
   Stroke? get currentStroke => _currentStroke;
